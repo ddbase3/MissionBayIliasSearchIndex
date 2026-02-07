@@ -20,7 +20,7 @@ A parser proxy resource sits between the `AiEmbeddingNode` and the real parser l
 * It also stores:
 
   * a direct link to the content (UI URL)
-  * title and description for UI display
+  * title + description (for result rendering)
   * read roles for access checks at search time
 
 ### 2) During delete jobs
@@ -32,17 +32,12 @@ A vector-store proxy resource sits between the `AiEmbeddingNode` and the real ve
 
 ### 3) Search UI (AJAX)
 
-This plugin includes an MVC-based search UI display.
+The plugin contains an MVC display (`IliasSearchIndexDisplay`) that provides:
 
-* A styled input field that searches via AJAX.
-* Debounced requests (example: 500ms idle).
-* Search starts at a minimum query length (default: 3 characters).
-* Multiple word queries are supported.
-* The UI renders up to 10 results showing:
+* an HTML search page
+* a JSON endpoint (`out=json&action=search`) that returns the top results
 
-  * title
-  * description (shortened)
-  * direct link
+The UI performs debounced requests (e.g. after 500ms of no typing), starts searching only at a minimum query length, and supports multi-word queries.
 
 ---
 
@@ -55,7 +50,6 @@ This plugin includes an MVC-based search UI display.
   * Implements `IAgentContentParser`
   * Docks a list of real parsers at dock `parsers`
   * Builds and stores a phonetic word index based on `AgentParsedContent`
-  * Stores direct link, title, description, and read roles
   * Ensures required DB tables exist
 
 * `SearchIndexVectorStoreProxyAgentResource`
@@ -65,27 +59,14 @@ This plugin includes an MVC-based search UI display.
   * Deletes index rows on `deleteByFilter(content_uuid)`
   * Ensures required DB tables exist
 
-### Display (MVC)
-
-* `IliasSearchIndexDisplay`
-
-  * Implements `Base3\Api\IDisplay`
-  * Renders HTML (template) or JSON (AJAX endpoint)
-  * Executes the phonetic DB search and returns result items
-  * Applies the same tokenization rules as indexing, including stopword filtering
-
 ### Services (lightweight, not docked)
 
-The phonetic components are small classes (not AgentResources).
+The phonetic components are small classes (not AgentResources) and are loaded via the BASE3 `IClassMap`.
 
 * `ColognePhoneticEncoder` (implements `IPhoneticEncoder`)
 * `ReversePhoneticStringToIntConverter` (implements `IPhoneticIntConverter`)
 
-Both implement `Base3\Api\IBase`.
-
-The indexing resource loads them via `IClassMap`.
-
-The search UI can either load them via config (recommended) or fall back to default names (current default implementation).
+Both implement `Base3\Api\IBase` and provide their technical name via `getName()`.
 
 ---
 
@@ -109,7 +90,7 @@ Schema:
 
 ### 2) `base3_content_direct_link`
 
-Stores UI and display fields for the content.
+Stores UI and listing fields for the content.
 
 Schema:
 
@@ -117,7 +98,8 @@ Schema:
 * `direct_link VARCHAR(512) NOT NULL`
 * `title VARCHAR(255) NOT NULL`
 * `description TEXT NOT NULL`
-* `PRIMARY KEY (content_id)`
+
+Note: the plugin assumes the table is newly created by `CREATE TABLE IF NOT EXISTS ...` and does not ship migrations.
 
 ### 3) `base3_content_read_roles`
 
@@ -153,16 +135,21 @@ words[] = "oder"
 words[] = "der"
 ```
 
-Stopword filtering is applied:
+### Used in indexing and searching
+
+Stopwords must be filtered both:
 
 * during indexing (parser proxy)
-* during search (search UI)
+* during query processing (search UI)
 
-This is important to keep query tokens aligned with the indexed token set.
+If they are not removed at query time, common words would generate noisy terms and lead to false-positive matches and unnecessary DB load.
 
-Language during indexing is taken from `AgentContentItem.metadata['lang']` if present, otherwise default is `de`.
+The stopword list is loaded lazily and cached per instance.
 
-The current search UI defaults to `de` as well.
+Language support:
+
+* Indexing: language is taken from `AgentContentItem.metadata['lang']` if present, otherwise default is `de`.
+* Search UI: currently defaults to `de` (can be extended later).
 
 ---
 
@@ -174,7 +161,7 @@ Users often misspell, and German spelling variants are common. A phonetic repres
 
 ### Default implementation: Cologne Phonetics
 
-`ColognePhoneticEncoder` converts a word into a digit string (for example: `"Meyer" -> "67..."`).
+`ColognePhoneticEncoder` converts a word into a digit string (e.g. `"Meyer" -> "67..."`).
 
 Unlike Soundex, Cologne Phonetics is a good default for German.
 
@@ -213,22 +200,22 @@ Numbers are currently removed. This may be refined later.
 
 ---
 
-## Search concept
-
-The search feature is implemented as an MVC display and uses the same index design as described below.
+## Search concept and current implementation
 
 ### Query transformation
 
 When a user searches for a word:
 
 1. Normalize the input
-2. Apply `ColognePhoneticEncoder`
-3. Reverse the code
-4. Convert to integer using `ReversePhoneticStringToIntConverter`
+2. Remove non-letters and split into words
+3. Remove stopwords
+4. For each remaining word:
 
-This produces the query integer `q`.
+   * Apply `ColognePhoneticEncoder`
+   * Reverse the code
+   * Convert to integer using `ReversePhoneticStringToIntConverter`
 
-Stopwords are removed at query time as well.
+This produces query integers `q1..qn`.
 
 ### Suffix matching via modulo
 
@@ -255,12 +242,15 @@ This supports prefix matches on the original (non-reversed) phonetic string.
 
 ### Multi-word queries
 
-For multi-word queries, the search endpoint generates one phonetic integer per word and looks for content IDs that match **all** terms.
+Multi-word search is implemented as:
 
-Implementation detail:
+* WHERE clause matches any term (OR)
+* GROUP BY content
+* HAVING ensures every query term matched at least once (AND)
 
-* SQL uses an `OR` pre-filter to reduce scanned rows
-* then uses a `GROUP BY content_id` with a HAVING clause that enforces term coverage
+This yields the behavior:
+
+* `word1 word2` means: content must match both terms (order irrelevant)
 
 ### Performance note
 
@@ -285,9 +275,14 @@ Optional, but used when present:
 
 * `direct_link` (string)
 * `read_roles` (array of int role IDs)
-* `lang` (string, for example `de`)
+* `lang` (string, e.g. `de`)
 
-The direct-link table additionally stores `title` and `description` when available.
+Additional fields used for the search result listing:
+
+* `title` (string)
+* `description` (string)
+
+The plugin stores `title` and `description` in `base3_content_direct_link` if they can be extracted from the content payload.
 
 ---
 
@@ -333,9 +328,6 @@ Key points:
 		{ "id": "parserproxy", "type": "fulltextindexingparseragentresource", "docks": {
 			"parsers": [ "fileparser", "pageparser", "courseparser", "fallbackparser" ],
 			"logger": [ "logger" ]
-		}, "config": {
-			"phonetic_encoder": { "mode": "fixed", "value": "colognephoneticencoder" },
-			"phonetic_int_converter": { "mode": "fixed", "value": "reversephoneticstringtointconverter" }
 		}},
 
 		{ "id": "chunker", "type": "iliaschunkeragentresource" },
@@ -359,37 +351,36 @@ Key points:
 
 ---
 
-## Search UI
+## Search UI usage
 
 ### Endpoint
 
-The search UI display supports both:
+The display provides a simple MVC page and a JSON endpoint.
 
-* `out=html` (renders the search page)
-* `out=json&action=search&q=...` (AJAX search)
+Typical HTML entry:
 
-Example (JSON):
+* `base3.php?name=iliassearchindexdisplay`
+
+JSON search call:
 
 * `base3.php?name=iliassearchindexdisplay&out=json&action=search&q=...`
 
-### Behavior
+### Client-side behavior
 
-* The browser sends debounced requests after typing.
-* Search only starts when the normalized query length is at least 3 characters.
-* The query is tokenized and stopwords are removed.
-* Up to 6 query words are used (to keep SQL bounded).
-* The endpoint returns up to 10 results.
+The template implements:
 
-### Result structure
+* a single search input field
+* debounced AJAX requests (example: 500ms)
+* minimum length before searching (default: 3)
+* rendering up to 10 results below the input
 
-Each result item contains:
+Each result shows:
 
-* `content_id` (hex string)
-* `direct_link` (UI link)
-* `title`
-* `description`
+* title
+* shortened description
+* direct link
 
-Role checks are not implemented yet.
+The current implementation does not yet apply role-based filtering in SQL. This will be added later.
 
 ---
 
@@ -415,6 +406,8 @@ Optional keys:
 
   * Override stopword directory
 
+Note: In some setups (like the search UI), services may be loaded directly via `IClassMap` without config.
+
 ### SearchIndexVectorStoreProxyAgentResource
 
 Optional keys:
@@ -429,23 +422,14 @@ Defaults:
 * `base3_content_direct_link`
 * `base3_content_read_roles`
 
-### IliasSearchIndexDisplay
-
-Current defaults:
-
-* encoder: `colognephoneticencoder`
-* int converter: `reversephoneticstringtointconverter`
-
-These can be made configurable later if multiple encoders are active.
-
 ---
 
 ## Notes and limitations
 
 * The current tokenizer removes numbers and non-letter characters.
 * Phrase search is intentionally not implemented.
-* SQL modulo matching is simple and robust; indexing optimizations may be added later.
-* Access checks via `base3_content_read_roles` are planned.
+* The search UI currently uses Cologne Phonetics and the reverse-to-int strategy.
+* Role filtering is planned but not implemented yet.
 
 ---
 
