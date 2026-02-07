@@ -23,6 +23,7 @@ final class FullTextIndexingParserAgentResource extends AbstractAgentResource im
 	private const META_DIRECT_LINK = 'direct_link';
 	private const META_READ_ROLES = 'read_roles';
 	private const META_LANG = 'lang';
+	private const META_TITLE = 'title';
 
 	private ?ILogger $logger = null;
 
@@ -204,7 +205,7 @@ final class FullTextIndexingParserAgentResource extends AbstractAgentResource im
 
 		$contentIdSql = "UNHEX('" . $this->esc($uuidHex) . "')";
 
-		$this->upsertDirectLink($item, $contentIdSql);
+		$this->upsertDirectLink($item, $parsed, $contentIdSql);
 		$this->replaceReadRoles($item, $contentIdSql);
 
 		foreach ($unique as $w) {
@@ -234,7 +235,7 @@ final class FullTextIndexingParserAgentResource extends AbstractAgentResource im
 		$this->db->nonQuery($sql);
 	}
 
-	private function upsertDirectLink(AgentContentItem $item, string $contentIdSql): void {
+	private function upsertDirectLink(AgentContentItem $item, AgentParsedContent $parsed, string $contentIdSql): void {
 		$link = $item->metadata[self::META_DIRECT_LINK] ?? null;
 		if (!is_string($link) || trim($link) === '') {
 			return;
@@ -242,16 +243,84 @@ final class FullTextIndexingParserAgentResource extends AbstractAgentResource im
 
 		$link = trim($link);
 
+		$title = $this->extractTitle($item, $parsed);
+		$description = $this->extractDescription($item, $parsed);
+
 		$this->db->connect();
 
 		$table = $this->escapeIdent($this->directLinkTable);
-		$linkEsc = $this->esc($link);
 
-		$sql = "INSERT INTO {$table} (content_id, direct_link)
-				VALUES ({$contentIdSql}, '{$linkEsc}')
-				ON DUPLICATE KEY UPDATE direct_link = VALUES(direct_link)";
+		$linkEsc = $this->esc($link);
+		$titleEsc = $this->esc($title);
+		$descEsc = $this->esc($description);
+
+		$sql = "INSERT INTO {$table} (content_id, direct_link, title, description)
+				VALUES ({$contentIdSql}, '{$linkEsc}', '{$titleEsc}', '{$descEsc}')
+				ON DUPLICATE KEY UPDATE
+						direct_link = VALUES(direct_link),
+						title = VALUES(title),
+						description = VALUES(description)";
 
 		$this->db->nonQuery($sql);
+	}
+
+	private function extractTitle(AgentContentItem $item, AgentParsedContent $parsed): string {
+		$title = $item->metadata[self::META_TITLE] ?? null;
+		if (is_string($title) && trim($title) !== '') {
+			return $this->truncateDbText(trim($title), 255);
+		}
+
+		$structured = $parsed->structured ?? null;
+		if (is_array($structured)) {
+			$t = $structured['title'] ?? null;
+			if (is_string($t) && trim($t) !== '') {
+				return $this->truncateDbText(trim($t), 255);
+			}
+		}
+
+		return '';
+	}
+
+	private function extractDescription(AgentContentItem $item, AgentParsedContent $parsed): string {
+		$structured = $parsed->structured ?? null;
+
+		if (is_array($structured)) {
+			$d = $structured['description'] ?? null;
+			if (is_string($d) && trim($d) !== '') {
+				return $this->truncateDbText(trim($d), 2000);
+			}
+		}
+
+		$text = trim((string)($parsed->text ?? ''));
+		if ($text !== '') {
+			$text = preg_replace('/\s+/u', ' ', $text) ?? $text;
+			return $this->truncateDbText(trim($text), 2000);
+		}
+
+		$content = $item->content ?? null;
+		if (is_array($content)) {
+			$payload = $content['content'] ?? null;
+			if (is_array($payload)) {
+				$d = $payload['description'] ?? null;
+				if (is_string($d) && trim($d) !== '') {
+					return $this->truncateDbText(trim($d), 2000);
+				}
+			}
+		}
+
+		return '';
+	}
+
+	private function truncateDbText(string $text, int $maxChars): string {
+		if ($maxChars <= 0) {
+			return '';
+		}
+
+		if (mb_strlen($text) <= $maxChars) {
+			return $text;
+		}
+
+		return mb_substr($text, 0, $maxChars);
 	}
 
 	private function replaceReadRoles(AgentContentItem $item, string $contentIdSql): void {
@@ -460,6 +529,8 @@ final class FullTextIndexingParserAgentResource extends AbstractAgentResource im
 		$sql = "CREATE TABLE IF NOT EXISTS {$table} (
 				content_id BINARY(16) NOT NULL,
 				direct_link VARCHAR(512) NOT NULL,
+				title VARCHAR(255) NOT NULL,
+				description TEXT NOT NULL,
 				PRIMARY KEY (content_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;";
 
