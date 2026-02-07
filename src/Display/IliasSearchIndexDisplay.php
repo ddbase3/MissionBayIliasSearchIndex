@@ -24,13 +24,20 @@ final class IliasSearchIndexDisplay implements IDisplay {
 	private string $directLinkTable = 'base3_content_direct_link';
 	private string $readRolesTable = 'base3_content_read_roles';
 
+	private string $stopWordDir = '';
+
+	/** @var array<string,bool> */
+	private array $stopWords = [];
+
 	public function __construct(
 		private readonly IDatabase $db,
 		private readonly IClassMap $classMap,
 		private readonly IMvcView $view,
 		private readonly IRequest $request,
 		private readonly IConfiguration $config
-	) {}
+	) {
+		$this->stopWordDir = dirname(__DIR__, 2) . '/local/StopWords';
+	}
 
 	public static function getName(): string {
 		return 'iliassearchindexdisplay';
@@ -125,12 +132,12 @@ final class IliasSearchIndexDisplay implements IDisplay {
 		$whereParts = [];
 		$havingParts = [];
 
-		foreach ($terms as $i => $t) {
+		foreach ($terms as $t) {
 			$pow = $this->pow10($t['len']);
 			$modExpr = "(s.token_int % {$pow})";
 
 			$whereParts[] = "({$modExpr} = {$t['value']})";
-			$havingParts[] = "SUM({$modExpr} = {$t['value']}) > 0";
+			$havingParts[] = "SUM(CASE WHEN {$modExpr} = {$t['value']} THEN 1 ELSE 0 END) > 0";
 		}
 
 		$where = implode(' OR ', $whereParts);
@@ -203,7 +210,6 @@ final class IliasSearchIndexDisplay implements IDisplay {
 			return [];
 		}
 
-		// de-dup terms (value+len)
 		$map = [];
 		foreach ($out as $t) {
 			$key = $t['value'] . ':' . $t['len'];
@@ -255,7 +261,6 @@ final class IliasSearchIndexDisplay implements IDisplay {
 	private function splitWords(string $q): array {
 		$q = mb_strtolower($q);
 
-		// letters only (same rule as indexing right now)
 		$q = preg_replace('/[^\p{L}]+/u', ' ', $q) ?? $q;
 		$q = trim($q);
 
@@ -268,6 +273,8 @@ final class IliasSearchIndexDisplay implements IDisplay {
 			return [];
 		}
 
+		$this->ensureStopWordsLoaded('de');
+
 		$out = [];
 		foreach ($parts as $p) {
 			$p = trim($p);
@@ -277,7 +284,12 @@ final class IliasSearchIndexDisplay implements IDisplay {
 			if (mb_strlen($p) < 2) {
 				continue;
 			}
+			if (isset($this->stopWords[$p])) {
+				continue;
+			}
+
 			$out[] = $p;
+
 			if (count($out) >= self::MAX_WORDS) {
 				break;
 			}
@@ -286,8 +298,43 @@ final class IliasSearchIndexDisplay implements IDisplay {
 		return $out;
 	}
 
+	private function ensureStopWordsLoaded(string $lang): void {
+		if ($this->stopWords) {
+			return;
+		}
+
+		$file = $this->stopWordDir . '/stopwords.' . strtolower(trim($lang)) . '.ini';
+		if (!is_file($file)) {
+			return;
+		}
+
+		$data = @parse_ini_file($file, true, INI_SCANNER_TYPED);
+		if (!is_array($data)) {
+			return;
+		}
+
+		$list = $data['stopwords']['words'] ?? null;
+		if (!is_array($list) || !$list) {
+			return;
+		}
+
+		$map = [];
+		foreach ($list as $w) {
+			if (!is_string($w)) {
+				continue;
+			}
+			$w = trim(mb_strtolower($w));
+			if ($w === '') {
+				continue;
+			}
+			$map[$w] = true;
+		}
+
+		$this->stopWords = $map;
+	}
+
 	private function pow10(int $len): int {
-		$len = max(1, min(18, $len)); // BIGINT-safe range
+		$len = max(1, min(18, $len));
 		$out = 1;
 		for ($i = 0; $i < $len; $i++) {
 			$out *= 10;
