@@ -114,23 +114,59 @@ final class FullTextIndexingParserAgentResource extends AbstractAgentResource im
 	}
 
 	public function supports(AgentContentItem $item): bool {
-		return $this->findFirstSupportingParser($item) !== null;
+		foreach ($this->parsers as $parser) {
+			try {
+				if ($parser->supports($item)) {
+					return true;
+				}
+			} catch (\Throwable $e) {
+				// Do not fail the proxy on supports() errors; try other parsers.
+				$this->log('supports ERROR ' . get_class($parser) . ': ' . $e->getMessage());
+				continue;
+			}
+		}
+		return false;
 	}
 
 	public function parse(AgentContentItem $item): AgentParsedContent {
-		$parser = $this->findFirstSupportingParser($item);
-		if (!$parser) {
-			throw new \RuntimeException('FullTextIndexingParserAgentResource: no inner parser supports this item.');
+		$errors = [];
+
+		foreach ($this->parsers as $parser) {
+			try {
+				if (!$parser->supports($item)) {
+					continue;
+				}
+			} catch (\Throwable $e) {
+				// Do not fail the proxy on supports() errors; try other parsers.
+				$errors[] = get_class($parser) . ' supports: ' . $e->getMessage();
+				$this->log('supports ERROR ' . get_class($parser) . ': ' . $e->getMessage());
+				continue;
+			}
+
+			try {
+				$parsed = $parser->parse($item);
+
+				$this->ensureTables();
+				$this->ensureStopWordsLoaded($this->getLanguage($item));
+
+				$this->indexParsedContent($item, $parsed);
+
+				$this->log('Parse ok inner=' . get_class($parser));
+				return $parsed;
+			} catch (\Throwable $e) {
+				// Critical: do NOT throw here, otherwise no fallback happens.
+				$errors[] = get_class($parser) . ' parse: ' . $e->getMessage();
+				$this->log('Parse FAIL inner=' . get_class($parser) . ' ' . $e->getMessage());
+				continue;
+			}
 		}
 
-		$parsed = $parser->parse($item);
+		$msg = 'FullTextIndexingParserAgentResource: no inner parser succeeded.';
+		if ($errors) {
+			$msg .= ' Errors: ' . implode(' | ', array_slice($errors, 0, 6));
+		}
 
-		$this->ensureTables();
-		$this->ensureStopWordsLoaded($this->getLanguage($item));
-
-		$this->indexParsedContent($item, $parsed);
-
-		return $parsed;
+		throw new \RuntimeException($msg);
 	}
 
 	private function loadPhoneticEncoder(): IPhoneticEncoder {
@@ -257,9 +293,9 @@ final class FullTextIndexingParserAgentResource extends AbstractAgentResource im
 		$sql = "INSERT INTO {$table} (content_id, direct_link, title, description)
 				VALUES ({$contentIdSql}, '{$linkEsc}', '{$titleEsc}', '{$descEsc}')
 				ON DUPLICATE KEY UPDATE
-						direct_link = VALUES(direct_link),
-						title = VALUES(title),
-						description = VALUES(description)";
+					direct_link = VALUES(direct_link),
+					title = VALUES(title),
+					description = VALUES(description)";
 
 		$this->db->nonQuery($sql);
 	}
@@ -485,15 +521,6 @@ final class FullTextIndexingParserAgentResource extends AbstractAgentResource im
 		}
 
 		return $uuidHex;
-	}
-
-	private function findFirstSupportingParser(AgentContentItem $item): ?IAgentContentParser {
-		foreach ($this->parsers as $parser) {
-			if ($parser->supports($item)) {
-				return $parser;
-			}
-		}
-		return null;
 	}
 
 	private function ensureTables(): void {
