@@ -8,6 +8,7 @@ use Base3\Api\IMvcView;
 use Base3\Api\IRequest;
 use Base3\Configuration\Api\IConfiguration;
 use Base3\Database\Api\IDatabase;
+use Base3\LinkTarget\Api\ILinkTargetService;
 use MissionBayIliasSearchIndex\Api\IPhoneticEncoder;
 use MissionBayIliasSearchIndex\Api\IPhoneticIntConverter;
 
@@ -34,7 +35,8 @@ final class IliasSearchIndexDisplay implements IDisplay {
 		private readonly IClassMap $classMap,
 		private readonly IMvcView $view,
 		private readonly IRequest $request,
-		private readonly IConfiguration $config
+		private readonly IConfiguration $config,
+		private readonly ILinkTargetService $linkTargetService
 	) {
 		$this->stopWordDir = dirname(__DIR__, 2) . '/local/StopWords';
 	}
@@ -351,20 +353,15 @@ final class IliasSearchIndexDisplay implements IDisplay {
 	}
 
 	private function buildEndpointBase(): string {
-		$baseEndpoint = '';
-		try {
-			$baseEndpoint = (string)($this->config->get('base')['endpoint'] ?? '');
-		} catch (\Throwable) {
-			$baseEndpoint = '';
-		}
-
-		$baseEndpoint = trim($baseEndpoint);
-		if ($baseEndpoint === '') {
-			$baseEndpoint = 'base3.php';
-		}
-
-		$sep = str_contains($baseEndpoint, '?') ? '&' : '?';
-		return $baseEndpoint . $sep . 'name=' . rawurlencode(self::getName()) . '&out=json&action=';
+		return $this->linkTargetService->getLink(
+			[
+				'name' => self::getName(),
+				'out' => 'json'
+			],
+			[
+				'action' => ''
+			]
+		);
 	}
 
 	private function jsonSuccess(array $data): string {
